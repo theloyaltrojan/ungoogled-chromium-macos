@@ -17,7 +17,7 @@ jobs:
     secrets: inherit
     with:
       arch: ${{ matrix.arch }}
-      os: macos-15  # [custom] GitHub-hosted (Depot runners are upstream-only)
+      os: macos-26  # [custom] GitHub-hosted (Depot runners are upstream-only)
 
   release:
     needs: build
