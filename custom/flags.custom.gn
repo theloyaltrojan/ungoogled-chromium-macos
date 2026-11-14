@@ -1,0 +1,9 @@
+# Personal GN args — appended after ungoogled-chromium's flags.gn + flags.macos.gn,
+# so anything here overrides them.
+
+# No debug symbols: much smaller out/ dir and faster linking on a 6-core Intel box.
+# (Upstream ships symbol_level=1 for crash symbolication; you don't need that.)
+symbol_level=0
+blink_symbol_level=0
+v8_symbol_level=0
+

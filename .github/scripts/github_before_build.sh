@@ -20,6 +20,8 @@ fi
 
 cp "$_main_repo/flags.gn" "$_src_dir/out/Default/args.gn"
 cat "$_root_dir/flags.macos.gn" >> "$_src_dir/out/Default/args.gn"
+# [custom] personal GN args, appended last so they win
+[[ -f "$_root_dir/custom/flags.custom.gn" ]] && cat "$_root_dir/custom/flags.custom.gn" >> "$_src_dir/out/Default/args.gn"
 
 cd "$_src_dir"
 

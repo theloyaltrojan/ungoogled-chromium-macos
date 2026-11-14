@@ -41,7 +41,7 @@ done
 
 shift "$(($OPTIND -1))"
 
-_arch=${1:-arm64}
+_arch=${1:-$(uname -m)}  # [custom] default to host arch (x86_64 on this Mac)
 
 if [[ -n "$_sdk_path" ]]; then
   # build_bindgen.py asks xcrun for the SDK; SDKROOT controls that selection.
@@ -65,10 +65,19 @@ mkdir -p "$_src_dir/out/Default"
 # Apply patches and substitutions
 python3 "$_main_repo/utils/prune_binaries.py" "$_src_dir" "$_main_repo/pruning.list"
 python3 "$_main_repo/utils/patches.py" apply "$_src_dir" "$_main_repo/patches" "$_root_dir/patches"
+# [custom] personal patches from ../custom/patches (series file, quilt-style)
+_custom_dir="$_root_dir/custom"
+if grep -qvE '^[[:space:]]*(#|$)' "$_custom_dir/patches/series" 2>/dev/null; then
+  python3 "$_main_repo/utils/patches.py" apply "$_src_dir" "$_custom_dir/patches"
+fi
 
 python3 "$_main_repo/utils/domain_substitution.py" apply -r "$_main_repo/domain_regex.list" -f "$_main_repo/domain_substitution.list" "$_src_dir"
 # Set build flags
 cat "$_main_repo/flags.gn" "$_root_dir/flags.macos.gn" > "$_src_dir/out/Default/args.gn"
+# [custom] personal GN args (appended last so they win)
+[[ -f "$_custom_dir/flags.custom.gn" ]] && cat "$_custom_dir/flags.custom.gn" >> "$_src_dir/out/Default/args.gn"
+# [custom] source tarballs (-d) ship no PGO profiles; phase 2 would fail at gn gen
+$clone || echo 'chrome_pgo_phase=0' >> "$_src_dir/out/Default/args.gn"
 
 if [[ -n "$_sdk_path" ]]; then
   # Chromium's sdk_inputs action requires its SDK path inside root_build_dir.
@@ -92,7 +101,7 @@ mkdir -p "$_src_dir/third_party/rust-toolchain/bin"
 cd "$_src_dir"
 
 # Fix ESBuild
-_esbuild_version="$(/opt/homebrew/bin/esbuild --version)"
+_esbuild_version="$(esbuild --version)"  # [custom] works for Intel (/usr/local) Homebrew too
 _esbuild_module="$_root_dir/build/esbuild-node/node_modules/esbuild"
 if [[ ! -f "$_esbuild_module/package.json" ]] || \
     [[ "$(node -p 'require(process.argv[1]).version' "$_esbuild_module/package.json")" != "$_esbuild_version" ]]; then

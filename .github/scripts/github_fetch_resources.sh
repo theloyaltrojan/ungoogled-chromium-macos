@@ -22,6 +22,10 @@ mkdir -p "$_src_dir/out/Default"
 
 python3 "$_main_repo/utils/prune_binaries.py" "$_src_dir" "$_main_repo/pruning.list"
 python3 "$_main_repo/utils/patches.py" apply "$_src_dir" "$_main_repo/patches" "$_root_dir/patches"
+# [custom] personal patches (custom/patches/series)
+if grep -qvE '^[[:space:]]*(#|$)' "$_root_dir/custom/patches/series" 2>/dev/null; then
+  python3 "$_main_repo/utils/patches.py" apply "$_src_dir" "$_root_dir/custom/patches"
+fi
 python3 "$_main_repo/utils/domain_substitution.py" apply -r "$_main_repo/domain_regex.list" -f "$_main_repo/domain_substitution.list" "$_src_dir"
 
 mkdir -p "$_src_dir/third_party/llvm-build/Release+Asserts"
