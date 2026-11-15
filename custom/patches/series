@@ -2,3 +2,4 @@
 # Lines starting with # are ignored.
 tor-toggle.patch
 island-ui.patch
+autoload-extensions.patch

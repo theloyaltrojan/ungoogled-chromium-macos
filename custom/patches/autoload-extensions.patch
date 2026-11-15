@@ -1,0 +1,78 @@
+# Load every unpacked extension in '<user data dir>/Autoload Extensions' at
+# startup (symlinks allowed), so personal extensions need no rebuild or Load unpacked.
+diff --git a/chrome/browser/extensions/extension_service.cc b/chrome/browser/extensions/extension_service.cc
+index 6351963..2540ac0 100644
+--- a/chrome/browser/extensions/extension_service.cc
++++ b/chrome/browser/extensions/extension_service.cc
+@@ -18,6 +18,8 @@
+ #include "base/command_line.h"
+ #include "base/debug/alias.h"
+ #include "base/debug/dump_without_crashing.h"
++#include "base/files/file_enumerator.h"
++#include "base/files/file_util.h"
+ #include "base/functional/bind.h"
+ #include "base/functional/callback.h"
+ #include "base/location.h"
+@@ -31,6 +33,7 @@
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/syslog_logging.h"
+ #include "base/task/single_thread_task_runner.h"
++#include "base/task/thread_pool.h"
+ #include "base/threading/thread_restrictions.h"
+ #include "base/time/time.h"
+ #include "base/trace_event/trace_event.h"
+@@ -173,6 +176,38 @@ bool ShouldBlockCommandLineExtension(Profile& profile) {
+ }
+ #endif
+ 
++
++// [custom] Directories inside "<user data dir>/Autoload Extensions" that hold a
++// manifest.json. Symlinked folders work too, so extensions can live anywhere.
++std::vector<base::FilePath> FindAutoloadExtensions(base::FilePath dir) {
++  std::vector<base::FilePath> found;
++  base::FileEnumerator e(
++      dir, /*recursive=*/false,
++      base::FileEnumerator::DIRECTORIES | base::FileEnumerator::FILES);
++  for (base::FilePath path = e.Next(); !path.empty(); path = e.Next()) {
++    if (base::DirectoryExists(path) &&
++        base::PathExists(path.Append(FILE_PATH_LITERAL("manifest.json")))) {
++      // Resolve symlinks so the extension ID (derived from the path) matches
++      // a manual "Load unpacked" of the same folder and keeps its data.
++      found.push_back(base::MakeAbsoluteFilePath(path));
++    }
++  }
++  return found;
++}
++
++void LoadAutoloadExtensions(base::WeakPtr<ExtensionService> service,
++                            std::vector<base::FilePath> paths) {
++  if (!service) {
++    return;
++  }
++  for (const base::FilePath& path : paths) {
++    scoped_refptr<UnpackedInstaller> installer =
++        UnpackedInstaller::Create(service->profile());
++    installer->set_be_noisy_on_failure(false);
++    installer->Load(path);
++  }
++}
++
+ }  // namespace
+ 
+ // ExtensionService.
+@@ -372,6 +407,15 @@ void ExtensionService::Init() {
+   if (load_command_line_extensions) {
+     LoadExtensionsFromCommandLineFlag(switches::kLoadExtension);
+   }
++  // [custom] Auto-load unpacked extensions; the directory scan runs off the UI
++  // thread.
++  base::ThreadPool::PostTaskAndReplyWithResult(
++      FROM_HERE, {base::MayBlock(), base::TaskPriority::USER_VISIBLE},
++      base::BindOnce(&FindAutoloadExtensions,
++                     profile_->GetPath().DirName().Append(
++                         FILE_PATH_LITERAL("Autoload Extensions"))),
++      base::BindOnce(&LoadAutoloadExtensions,
++                     weak_ptr_factory_.GetWeakPtr()));
+   EnabledReloadableExtensions();
+   delayed_install_manager_->FinishInstallationsDelayedByShutdown();
+   SetReadyAndNotifyListeners();

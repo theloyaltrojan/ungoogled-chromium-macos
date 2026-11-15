@@ -1,47 +1,81 @@
-# Native Tor toggle: "Route through Tor" check item in the app (⋮) menu.
-# Switches the profile proxy pref to socks5://127.0.0.1:9050 at runtime and
-# blocks non-proxied WebRTC UDP; unchecking restores a direct connection.
+# Tor, built in. App menu: New Tor window (throwaway incognito profile routed
+# through 127.0.0.1:9050), Route everything through Tor (global toggle), New Tor
+# identity (SIGNAL NEWNYM via ~/.local/bin/tor-newnym + drop pooled connections).
+# A purple 'tor' pill shows in the toolbar of any window that goes through Tor.
+# WebRTC is limited to proxied UDP while Tor is on.
 diff --git a/chrome/app/chrome_command_ids.h b/chrome/app/chrome_command_ids.h
-index a9f146a..4e1b685 100644
+index a9f146a..36cb2d1 100644
 --- a/chrome/app/chrome_command_ids.h
 +++ b/chrome/app/chrome_command_ids.h
-@@ -242,6 +242,7 @@
+@@ -242,6 +242,9 @@
  #define IDC_UPGRADE_DIALOG              40024
  #define IDC_SHOW_HISTORY_CLUSTERS_SIDE_PANEL 40025
  #define IDC_PROFILING_ENABLED           40028
 +#define IDC_TOGGLE_TOR                  40029
++#define IDC_NEW_TOR_WINDOW              40030
++#define IDC_TOR_NEW_IDENTITY            40032
  #define IDC_EXTENSION_ERRORS            40031
  #define IDC_SHOW_AVATAR_MENU            40134
  #define IDC_EXTENSION_INSTALL_ERROR_FIRST 40135
 diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
-index 24b48bb..e67e0c0 100644
+index 24b48bb..db3d79a 100644
 --- a/chrome/browser/ui/browser_command_controller.cc
 +++ b/chrome/browser/ui/browser_command_controller.cc
-@@ -1310,6 +1310,9 @@ void BrowserCommandController::HandleCommandWithDisposition(
+@@ -1310,6 +1310,15 @@ void BrowserCommandController::HandleCommandWithDisposition(
            webui::GetBrowserForOpeningWebUi(browser_),
            password_manager::ManagePasswordsReferrer::kChromeMenuItem);
        break;
 +    case IDC_TOGGLE_TOR:
 +      ToggleTor(profile());
 +      break;
++    case IDC_NEW_TOR_WINDOW:
++      NewTorWindow(profile());
++      break;
++    case IDC_TOR_NEW_IDENTITY:
++      NewTorIdentity(profile());
++      break;
      case IDC_CLEAR_BROWSING_DATA: {
        if (profile()->IsIncognitoProfile()) {
          ShowIncognitoClearBrowsingDataDialog(
-@@ -1923,6 +1926,9 @@ void BrowserCommandController::InitCommandState() {
+@@ -1923,6 +1932,13 @@ void BrowserCommandController::InitCommandState() {
    command_updater_->UpdateCommandEnabled(IDC_MANAGE_CHROME_PROFILES, true);
  #endif  // BUILDFLAG(IS_CHROMEOS)
  
 +  command_updater_->UpdateCommandEnabled(
 +      IDC_TOGGLE_TOR, !guest_session && !profile()->IsSystemProfile());
++  command_updater_->UpdateCommandEnabled(
++      IDC_NEW_TOR_WINDOW, !guest_session && !profile()->IsSystemProfile());
++  command_updater_->UpdateCommandEnabled(
++      IDC_TOR_NEW_IDENTITY, !guest_session && !profile()->IsSystemProfile());
 +
    if (profile()->IsIncognitoProfile()) {
      command_updater_->UpdateCommandEnabled(IDC_CLEAR_BROWSING_DATA, true);
    } else {
 diff --git a/chrome/browser/ui/browser_commands.cc b/chrome/browser/ui/browser_commands.cc
-index f4d3a23..d9a1df2 100644
+index f4d3a23..6087584 100644
 --- a/chrome/browser/ui/browser_commands.cc
 +++ b/chrome/browser/ui/browser_commands.cc
-@@ -1346,6 +1346,39 @@ void NewIncognitoWindow(Profile* profile) {
+@@ -15,6 +15,10 @@
+ #include "base/check.h"
+ #include "base/check_deref.h"
+ #include "base/command_line.h"
++#include "base/files/file_util.h"
++#include "base/functional/callback_helpers.h"
++#include "base/process/launch.h"
++#include "base/task/thread_pool.h"
+ #include "base/containers/adapters.h"
+ #include "base/feature_list.h"
+ #include "base/i18n/rtl.h"
+@@ -200,6 +204,8 @@
+ #include "content/public/browser/render_view_host.h"
+ #include "content/public/browser/render_widget_host_view.h"
+ #include "content/public/browser/web_contents.h"
++#include "services/network/public/mojom/network_context.mojom.h"
++#include "content/public/browser/storage_partition.h"
+ #include "content/public/common/content_switches.h"
+ #include "content/public/common/url_constants.h"
+ #include "content/public/common/url_utils.h"
+@@ -1346,6 +1352,78 @@ void NewIncognitoWindow(Profile* profile) {
    NewEmptyWindow(profile->GetPrimaryOTRProfile(/*create_if_needed=*/true));
  }
  
@@ -49,19 +83,9 @@ index f4d3a23..d9a1df2 100644
 +// Pref path and dictionary keys used by components/proxy_config.
 +constexpr char kTorProxyPref[] = "proxy";
 +constexpr char kTorProxyServer[] = "socks5://127.0.0.1:9050";
-+}  // namespace
 +
-+bool IsTorEnabled(Profile* profile) {
-+  const base::DictValue& proxy =
-+      profile->GetOriginalProfile()->GetPrefs()->GetDict(kTorProxyPref);
-+  const std::string* server = proxy.FindString("server");
-+  return server && *server == kTorProxyServer;
-+}
-+
-+void ToggleTor(Profile* profile) {
-+  // Proxy settings live on the regular profile; incognito windows inherit them.
-+  PrefService* prefs = profile->GetOriginalProfile()->GetPrefs();
-+  if (IsTorEnabled(profile)) {
++void SetTorPrefs(PrefService* prefs, bool on) {
++  if (!on) {
 +    prefs->ClearPref(kTorProxyPref);
 +    prefs->SetString(prefs::kWebRTCIPHandlingPolicy,
 +                     "default_public_interface_only");
@@ -78,14 +102,63 @@ index f4d3a23..d9a1df2 100644
 +  prefs->SetString(prefs::kWebRTCIPHandlingPolicy, "disable_non_proxied_udp");
 +}
 +
++void CloseConnections(Profile* profile) {
++  profile->GetDefaultStoragePartition()->GetNetworkContext()
++      ->CloseAllConnections(base::DoNothing());
++}
++}  // namespace
++
++// True when |profile|'s own prefs (including anything inherited by an
++// incognito profile) route through Tor.
++bool IsTorEnabled(Profile* profile) {
++  const base::DictValue& proxy = profile->GetPrefs()->GetDict(kTorProxyPref);
++  const std::string* server = proxy.FindString("server");
++  return server && *server == kTorProxyServer;
++}
++
++void ToggleTor(Profile* profile) {
++  // The global toggle lives on the regular profile; incognito windows inherit
++  // it. Tor windows have their own setting and are unaffected.
++  Profile* original = profile->GetOriginalProfile();
++  SetTorPrefs(original->GetPrefs(), !IsTorEnabled(original));
++}
++
++void NewTorWindow(Profile* profile) {
++  Profile* tor_profile = profile->GetOriginalProfile()->GetOffTheRecordProfile(
++      Profile::OTRProfileID::CreateUnique("Tor::Window"),
++      /*create_if_needed=*/true);
++  SetTorPrefs(tor_profile->GetPrefs(), true);
++  OpenEmptyWindow(tor_profile, /*should_trigger_session_restore=*/false);
++}
++
++void NewTorIdentity(Profile* profile) {
++  base::ThreadPool::PostTask(
++      FROM_HERE,
++      {base::MayBlock(), base::TaskShutdownBehavior::CONTINUE_ON_SHUTDOWN},
++      base::BindOnce([] {
++        const base::FilePath helper =
++            base::GetHomeDir().Append(".local/bin/tor-newnym");
++        if (!base::PathExists(helper)) {
++          LOG(WARNING) << "New Tor identity: " << helper << " not found";
++          return;
++        }
++        base::LaunchProcess(base::CommandLine(helper), base::LaunchOptions());
++      }));
++  Profile* original = profile->GetOriginalProfile();
++  CloseConnections(original);
++  for (Profile* otr : original->GetAllOffTheRecordProfiles()) {
++    CloseConnections(otr);
++  }
++}
++
  void CloseWindow(BrowserWindowInterface* browser) {
    base::RecordAction(UserMetricsAction("CloseWindow"));
    browser->GetWindow()->Close();
 diff --git a/chrome/browser/ui/browser_commands.h b/chrome/browser/ui/browser_commands.h
-index d0afaef..f2df420 100644
+index d0afaef..25873e9 100644
 --- a/chrome/browser/ui/browser_commands.h
 +++ b/chrome/browser/ui/browser_commands.h
-@@ -125,6 +125,10 @@ base::WeakPtr<content::NavigationHandle> OpenCurrentURL(
+@@ -125,6 +125,17 @@ base::WeakPtr<content::NavigationHandle> OpenCurrentURL(
  void Stop(BrowserWindowInterface* browser);
  void NewWindow(BrowserWindowInterface* browser);
  void NewIncognitoWindow(Profile* profile);
@@ -93,11 +166,18 @@ index d0afaef..f2df420 100644
 +// (127.0.0.1:9050) and blocks non-proxied WebRTC UDP, or undoes that.
 +bool IsTorEnabled(Profile* profile);
 +void ToggleTor(Profile* profile);
++// Opens a window in its own throwaway off-the-record profile whose traffic
++// (only) goes through Tor; other windows are unaffected.
++void NewTorWindow(Profile* profile);
++// Asks the local tor daemon for fresh circuits (SIGNAL NEWNYM via
++// ~/.local/bin/tor-newnym) and drops pooled connections so new requests use
++// them.
++void NewTorIdentity(Profile* profile);
  void CloseWindow(BrowserWindowInterface* browser);
  content::WebContents& NewTab(BrowserWindowInterface* browser,
                               NewTabTypes context);
 diff --git a/chrome/browser/ui/toolbar/app_menu_model.cc b/chrome/browser/ui/toolbar/app_menu_model.cc
-index 1a6eec6..86f7a69 100644
+index 1a6eec6..047880b 100644
 --- a/chrome/browser/ui/toolbar/app_menu_model.cc
 +++ b/chrome/browser/ui/toolbar/app_menu_model.cc
 @@ -1874,6 +1874,9 @@ bool AppMenuModel::IsCommandIdChecked(int command_id) const {
@@ -105,17 +185,106 @@ index 1a6eec6..86f7a69 100644
      return chrome::IsRequestingTabletSite(browser_);
    }
 +  if (command_id == IDC_TOGGLE_TOR) {
-+    return chrome::IsTorEnabled(browser_->GetProfile());
++    return chrome::IsTorEnabled(browser_->GetProfile()->GetOriginalProfile());
 +  }
  
    return false;
  }
-@@ -2009,6 +2012,8 @@ void AppMenuModel::Build() {
+@@ -2009,6 +2012,10 @@ void AppMenuModel::Build() {
                ? vector_icons::kDomainIcon
                : vector_icons::kBusinessChromeRefreshOldIcon);
      }
 +
-+    AddCheckItem(IDC_TOGGLE_TOR, u"Route through Tor");
++    AddItem(IDC_NEW_TOR_WINDOW, u"New Tor window");
++    AddCheckItem(IDC_TOGGLE_TOR, u"Route everything through Tor");
++    AddItem(IDC_TOR_NEW_IDENTITY, u"New Tor identity");
    }
  
    AddSeparator(ui::NORMAL_SEPARATOR);
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_view.cc b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+index b947e75..7c8da2f 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -161,8 +161,10 @@
+ #include "ui/views/accessibility/view_accessibility.h"
+ #include "ui/views/actions/action_view_controller.h"
+ #include "ui/views/background.h"
++#include "ui/views/border.h"
+ #include "ui/views/cascading_property.h"
+ #include "ui/views/controls/button/label_button.h"
++#include "ui/views/controls/label.h"
+ #include "ui/views/controls/separator.h"
+ #include "ui/views/layout/fill_layout.h"
+ #include "ui/views/layout/flex_layout.h"
+@@ -483,6 +485,19 @@ void ToolbarView::Init() {
+     contextual_tasks_button_ = AddChildViewAt(std::move(button), 0);
+   }
+ 
++  {
++    // [custom] "tor" pill, hidden unless this window routes through Tor.
++    auto tor = std::make_unique<views::Label>(u"tor");
++    tor->SetEnabledColor(SkColorSetRGB(0xE9, 0xDC, 0xFF));
++    tor->SetBackground(views::CreateRoundedRectBackground(
++        SkColorSetRGB(0x5B, 0x2E, 0xB0), 10.0f));
++    tor->SetBorder(views::CreateEmptyBorder(gfx::Insets::VH(2, 9)));
++    tor->SetProperty(views::kMarginsKey, gfx::Insets::VH(0, 4));
++    tor->SetTooltipText(u"This window's traffic goes through Tor");
++    tor->SetVisible(false);
++    tor_indicator_ = AddChildView(std::move(tor));
++  }
++
+   if (location_bar_view) {
+     location_bar_view_ = AddChildView(std::move(location_bar_view));
+     location_bar_ = location_bar_view_;
+@@ -694,6 +709,13 @@ void ToolbarView::Init() {
+     home_->SetVisible(show_home_button_.GetValue());
+   }
+ 
++  // [custom] Keep the Tor pill in sync with this window's proxy pref.
++  tor_pref_registrar_.Init(prefs);
++  tor_pref_registrar_.Add(
++      "proxy", base::BindRepeating(&ToolbarView::UpdateTorIndicator,
++                                   base::Unretained(this)));
++  UpdateTorIndicator();
++
+   auto* vertical_tab_strip_state_controller =
+       tabs::VerticalTabStripStateController::From(browser_view_->browser());
+   if (vertical_tab_strip_state_controller) {
+@@ -2150,6 +2172,12 @@ void ToolbarView::OnShowForwardButtonChanged() {
+   InvalidateLayout();
+ }
+ 
++void ToolbarView::UpdateTorIndicator() {
++  if (tor_indicator_) {
++    tor_indicator_->SetVisible(chrome::IsTorEnabled(browser_->GetProfile()));
++  }
++}
++
+ void ToolbarView::OnShowHomeButtonChanged() {
+   if (home_) {
+     home_->SetVisible(show_home_button_.GetValue());
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_view.h b/chrome/browser/ui/views/toolbar/toolbar_view.h
+index 50e5462..0151ce8 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.h
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.h
+@@ -29,6 +29,7 @@
+ #include "chrome/browser/ui/views/toolbar/pinned_toolbar_actions.h"
+ #include "chrome/browser/ui/views/toolbar/split_tabs_button.h"
+ #include "components/apps/link_capturing/intent_picker_info.h"
++#include "components/prefs/pref_change_registrar.h"
+ #include "components/prefs/pref_member.h"
+ #include "ui/base/accelerators/accelerator.h"
+ #include "ui/base/interaction/element_identifier.h"
+@@ -481,6 +482,12 @@ class ToolbarView : public views::AccessiblePaneView,
+ 
+   BooleanPrefMember show_chrome_labs_button_;
+ 
++  // [custom] Pill shown at the start of the toolbar while this window's
++  // traffic goes through Tor.
++  void UpdateTorIndicator();
++  raw_ptr<views::View> tor_indicator_ = nullptr;
++  PrefChangeRegistrar tor_pref_registrar_;
++
+   // The display mode used when laying out the toolbar.
+   const DisplayMode display_mode_;
+ 
