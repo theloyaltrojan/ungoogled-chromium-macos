@@ -1,0 +1,121 @@
+# Native Tor toggle: "Route through Tor" check item in the app (⋮) menu.
+# Switches the profile proxy pref to socks5://127.0.0.1:9050 at runtime and
+# blocks non-proxied WebRTC UDP; unchecking restores a direct connection.
+diff --git a/chrome/app/chrome_command_ids.h b/chrome/app/chrome_command_ids.h
+index a9f146a..4e1b685 100644
+--- a/chrome/app/chrome_command_ids.h
++++ b/chrome/app/chrome_command_ids.h
+@@ -242,6 +242,7 @@
+ #define IDC_UPGRADE_DIALOG              40024
+ #define IDC_SHOW_HISTORY_CLUSTERS_SIDE_PANEL 40025
+ #define IDC_PROFILING_ENABLED           40028
++#define IDC_TOGGLE_TOR                  40029
+ #define IDC_EXTENSION_ERRORS            40031
+ #define IDC_SHOW_AVATAR_MENU            40134
+ #define IDC_EXTENSION_INSTALL_ERROR_FIRST 40135
+diff --git a/chrome/browser/ui/browser_command_controller.cc b/chrome/browser/ui/browser_command_controller.cc
+index 24b48bb..e67e0c0 100644
+--- a/chrome/browser/ui/browser_command_controller.cc
++++ b/chrome/browser/ui/browser_command_controller.cc
+@@ -1310,6 +1310,9 @@ void BrowserCommandController::HandleCommandWithDisposition(
+           webui::GetBrowserForOpeningWebUi(browser_),
+           password_manager::ManagePasswordsReferrer::kChromeMenuItem);
+       break;
++    case IDC_TOGGLE_TOR:
++      ToggleTor(profile());
++      break;
+     case IDC_CLEAR_BROWSING_DATA: {
+       if (profile()->IsIncognitoProfile()) {
+         ShowIncognitoClearBrowsingDataDialog(
+@@ -1923,6 +1926,9 @@ void BrowserCommandController::InitCommandState() {
+   command_updater_->UpdateCommandEnabled(IDC_MANAGE_CHROME_PROFILES, true);
+ #endif  // BUILDFLAG(IS_CHROMEOS)
+ 
++  command_updater_->UpdateCommandEnabled(
++      IDC_TOGGLE_TOR, !guest_session && !profile()->IsSystemProfile());
++
+   if (profile()->IsIncognitoProfile()) {
+     command_updater_->UpdateCommandEnabled(IDC_CLEAR_BROWSING_DATA, true);
+   } else {
+diff --git a/chrome/browser/ui/browser_commands.cc b/chrome/browser/ui/browser_commands.cc
+index f4d3a23..d9a1df2 100644
+--- a/chrome/browser/ui/browser_commands.cc
++++ b/chrome/browser/ui/browser_commands.cc
+@@ -1346,6 +1346,39 @@ void NewIncognitoWindow(Profile* profile) {
+   NewEmptyWindow(profile->GetPrimaryOTRProfile(/*create_if_needed=*/true));
+ }
+ 
++namespace {
++// Pref path and dictionary keys used by components/proxy_config.
++constexpr char kTorProxyPref[] = "proxy";
++constexpr char kTorProxyServer[] = "socks5://127.0.0.1:9050";
++}  // namespace
++
++bool IsTorEnabled(Profile* profile) {
++  const base::DictValue& proxy =
++      profile->GetOriginalProfile()->GetPrefs()->GetDict(kTorProxyPref);
++  const std::string* server = proxy.FindString("server");
++  return server && *server == kTorProxyServer;
++}
++
++void ToggleTor(Profile* profile) {
++  // Proxy settings live on the regular profile; incognito windows inherit them.
++  PrefService* prefs = profile->GetOriginalProfile()->GetPrefs();
++  if (IsTorEnabled(profile)) {
++    prefs->ClearPref(kTorProxyPref);
++    prefs->SetString(prefs::kWebRTCIPHandlingPolicy,
++                     "default_public_interface_only");
++    return;
++  }
++  // SOCKS5 resolves hostnames on the proxy side, so DNS goes through Tor and
++  // .onion works. If Tor isn't running, requests fail rather than going direct.
++  base::DictValue proxy;
++  proxy.Set("mode", "fixed_servers");
++  proxy.Set("server", kTorProxyServer);
++  proxy.Set("bypass_list", "localhost;127.0.0.1;[::1]");
++  prefs->SetDict(kTorProxyPref, std::move(proxy));
++  // WebRTC UDP can bypass the proxy and reveal the real IP.
++  prefs->SetString(prefs::kWebRTCIPHandlingPolicy, "disable_non_proxied_udp");
++}
++
+ void CloseWindow(BrowserWindowInterface* browser) {
+   base::RecordAction(UserMetricsAction("CloseWindow"));
+   browser->GetWindow()->Close();
+diff --git a/chrome/browser/ui/browser_commands.h b/chrome/browser/ui/browser_commands.h
+index d0afaef..f2df420 100644
+--- a/chrome/browser/ui/browser_commands.h
++++ b/chrome/browser/ui/browser_commands.h
+@@ -125,6 +125,10 @@ base::WeakPtr<content::NavigationHandle> OpenCurrentURL(
+ void Stop(BrowserWindowInterface* browser);
+ void NewWindow(BrowserWindowInterface* browser);
+ void NewIncognitoWindow(Profile* profile);
++// Routes all of |profile|'s traffic through the local Tor SOCKS5 proxy
++// (127.0.0.1:9050) and blocks non-proxied WebRTC UDP, or undoes that.
++bool IsTorEnabled(Profile* profile);
++void ToggleTor(Profile* profile);
+ void CloseWindow(BrowserWindowInterface* browser);
+ content::WebContents& NewTab(BrowserWindowInterface* browser,
+                              NewTabTypes context);
+diff --git a/chrome/browser/ui/toolbar/app_menu_model.cc b/chrome/browser/ui/toolbar/app_menu_model.cc
+index 1a6eec6..86f7a69 100644
+--- a/chrome/browser/ui/toolbar/app_menu_model.cc
++++ b/chrome/browser/ui/toolbar/app_menu_model.cc
+@@ -1874,6 +1874,9 @@ bool AppMenuModel::IsCommandIdChecked(int command_id) const {
+   if (command_id == IDC_TOGGLE_REQUEST_TABLET_SITE) {
+     return chrome::IsRequestingTabletSite(browser_);
+   }
++  if (command_id == IDC_TOGGLE_TOR) {
++    return chrome::IsTorEnabled(browser_->GetProfile());
++  }
+ 
+   return false;
+ }
+@@ -2009,6 +2012,8 @@ void AppMenuModel::Build() {
+               ? vector_icons::kDomainIcon
+               : vector_icons::kBusinessChromeRefreshOldIcon);
+     }
++
++    AddCheckItem(IDC_TOGGLE_TOR, u"Route through Tor");
+   }
+ 
+   AddSeparator(ui::NORMAL_SEPARATOR);
