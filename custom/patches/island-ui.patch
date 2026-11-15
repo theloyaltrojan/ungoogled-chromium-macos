@@ -1,0 +1,68 @@
+# Island UI: pill-shaped tabs (active tab no longer flares into the toolbar)
+# and a toolbar with rounded corners floating on the frame color.
+diff --git a/chrome/browser/ui/views/tabs/common/horizontal_tab_style_views.cc b/chrome/browser/ui/views/tabs/common/horizontal_tab_style_views.cc
+index 5e8bf77..d91b9ed 100644
+--- a/chrome/browser/ui/views/tabs/common/horizontal_tab_style_views.cc
++++ b/chrome/browser/ui/views/tabs/common/horizontal_tab_style_views.cc
+@@ -89,8 +89,12 @@ SkPath HorizontalTabStyleViews::GetPath(TabStyle::PathType path_type,
+                                   scale;
+ 
+   // Selected, hover, and inactive tab fills are a detached squarcle tab.
++  // [custom] Island: the active tab and its border are detached pills too,
++  // instead of the file-folder shape that flares into the toolbar.
+   if (path_type == TabStyle::PathType::kHighlight ||
+-      path_type == TabStyle::PathType::kHitTest) {
++      path_type == TabStyle::PathType::kHitTest ||
++      path_type == TabStyle::PathType::kActiveTab ||
++      path_type == TabStyle::PathType::kBorder) {
+     float top_left_corner_radius = content_corner_radius;
+     float top_right_corner_radius = content_corner_radius;
+     float bottom_left_corner_radius = content_corner_radius;
+@@ -164,6 +168,15 @@ SkPath HorizontalTabStyleViews::GetPath(TabStyle::PathType path_type,
+       }
+     }
+ 
++    // [custom] Island: fully rounded (pill) ends on every rounded corner.
++    const float pill_radius = std::min(bottom - top, right - left) / 2.0f;
++    for (float* r : {&top_left_corner_radius, &top_right_corner_radius,
++                     &bottom_right_corner_radius, &bottom_left_corner_radius}) {
++      if (*r > 0) {
++        *r = std::max(*r, pill_radius);
++      }
++    }
++
+     // Radii are clockwise from top left.
+     const SkVector radii[4] = {
+         SkVector(top_left_corner_radius, top_left_corner_radius),
+diff --git a/chrome/browser/ui/views/toolbar/toolbar_view.cc b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+index b947e75..a253b83 100644
+--- a/chrome/browser/ui/views/toolbar/toolbar_view.cc
++++ b/chrome/browser/ui/views/toolbar/toolbar_view.cc
+@@ -363,10 +363,25 @@ void ToolbarView::Init() {
+   }
+ 
+   if (display_mode_ == DisplayMode::kNormal) {
+-    SetBackground(std::make_unique<CustomCornersBackground>(
++    // [custom] Island: the toolbar is a rounded slab sitting on the frame
++    // color, so it reads as a floating bar rather than part of the window.
++    constexpr int kIslandRadius = 14;
++    auto island = std::make_unique<CustomCornersBackground>(
+         *this, *browser_view_,
+         /*primary_color=*/CustomCornersBackground::ToolbarTheme(),
+-        /*corner_color=*/CustomCornersBackground::FrameTheme()));
++        /*corner_color=*/CustomCornersBackground::FrameTheme(),
++        /*default_radius=*/kIslandRadius);
++    CustomCornersBackground::Corners island_corners;
++    for (CornerOrientation corner :
++         {CornerOrientation::kTopLeading, CornerOrientation::kTopTrailing,
++          CornerOrientation::kBottomLeading,
++          CornerOrientation::kBottomTrailing}) {
++      island_corners[corner] = {
++          CustomCornersBackground::CornerType::kRoundedWithBackground,
++          kIslandRadius};
++    }
++    island->SetCorners(island_corners);
++    SetBackground(std::move(island));
+   } else if (display_mode_ == DisplayMode::kCustomTab) {
+     custom_tab_bar_ =
+         AddChildView(std::make_unique<CustomTabBarView>(browser_view_, this));

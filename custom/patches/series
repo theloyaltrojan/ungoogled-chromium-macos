@@ -1,3 +1,4 @@
 # One patch path per line, relative to this directory. Applied after upstream patches.
 # Lines starting with # are ignored.
 tor-toggle.patch
+island-ui.patch
