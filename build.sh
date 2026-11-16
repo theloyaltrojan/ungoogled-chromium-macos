@@ -71,6 +71,20 @@ if grep -qvE '^[[:space:]]*(#|$)' "$_custom_dir/patches/series" 2>/dev/null; the
   python3 "$_main_repo/utils/patches.py" apply "$_src_dir" "$_custom_dir/patches"
 fi
 
+# [custom] upstream patches hardcode Apple Silicon Homebrew paths for tsc/esbuild;
+# point them at whatever is on PATH (Intel Homebrew or ~/.local)
+if [[ ! -x /opt/homebrew/bin/tsc || ! -x /opt/homebrew/bin/esbuild ]]; then
+  for _f in scripts/build/typescript/typescript_vars.gni third_party/typescript/typescript.py \
+            scripts/build/ninja/bundle.gni scripts/devtools_paths.py; do
+    sed -i '' -e "s|/opt/homebrew/bin/tsc|$(command -v tsc)|g" \
+              -e "s|/opt/homebrew/bin/esbuild|$(command -v esbuild)|g" \
+      "$_src_dir/third_party/devtools-frontend/src/$_f"
+  done
+  # esbuild.js assembles the path piecewise: path.join('/', 'opt', 'homebrew', 'bin', binaryName)
+  perl -0pi -e "s|path\.join\(\s*'/',\s*'opt',\s*'homebrew',\s*'bin',\s*binaryName,\s*\)|'$(command -v esbuild)'|" \
+    "$_src_dir/third_party/devtools-frontend/src/scripts/build/esbuild.js"
+fi
+
 python3 "$_main_repo/utils/domain_substitution.py" apply -r "$_main_repo/domain_regex.list" -f "$_main_repo/domain_substitution.list" "$_src_dir"
 # Set build flags
 cat "$_main_repo/flags.gn" "$_root_dir/flags.macos.gn" > "$_src_dir/out/Default/args.gn"
@@ -84,6 +98,17 @@ if [[ -n "$_sdk_path" ]]; then
   mkdir -p "$_src_dir/out/Default/sdk"
   ln -s "$_sdk_path" "$_src_dir/out/Default/sdk/selected_macos_sdk"
   echo 'mac_sdk_path = "//out/Default/sdk/selected_macos_sdk"' >> "$_src_dir/out/Default/args.gn"
+fi
+
+# [custom] Intel Macs can't run Xcode 26.4+, so they build with an older SDK;
+# custom/old-sdk-fixes.sh patches the few places that assume the macOS 26 SDK.
+if [[ -n "$_sdk_path" ]]; then
+  _sdk_major="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["Version"].split(".")[0])' "$_sdk_path/SDKSettings.json")"
+else
+  _sdk_major="$(xcrun --sdk macosx --show-sdk-version | cut -d. -f1)"
+fi
+if (( _sdk_major < 26 )); then
+  "$_root_dir/custom/old-sdk-fixes.sh" "$_src_dir"
 fi
 
 # Set target_cpu to the corresponding architecture
