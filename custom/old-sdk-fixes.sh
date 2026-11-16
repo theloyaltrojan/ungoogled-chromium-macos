@@ -7,6 +7,7 @@
 # Each fix only hides macOS 26 SDK symbols at compile time; runtime behaviour on
 # macOS 26 is unchanged where Chromium already had a fallback.
 set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 src="$1"
 cd "$src"
 
@@ -83,5 +84,17 @@ wrap ui/display/mac/screen_utils_mac.mm "$SDK26" \
     }' \
 '    screen_display_id =
         [screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];'
+
+# Accessibility: ~140 web AX constants (kAX*Subrole/Attribute/Notification,
+# NSAccessibilitySearch*Key) were first declared publicly in the 26 SDK. Define
+# them (same strings WebKit uses) and include the header where they're used.
+cp "$here/ax_sdk26_compat.h" ui/accessibility/platform/ax_sdk26_compat_mac.h
+for f in ax_platform_node_cocoa.mm ax_platform_node_cocoa_unittest.mm browser_accessibility_cocoa.mm \
+         browser_accessibility_manager_mac.mm browser_accessibility_mac_unittest.mm \
+         inspect/ax_inspect_utils_mac.mm inspect/ax_event_recorder_mac.mm inspect/ax_element_wrapper_mac.mm; do
+  f="ui/accessibility/platform/$f"
+  grep -q 'ax_sdk26_compat_mac.h' "$f" ||
+  perl -0pi -e 's|^(#(?:include\|import) )|#include "ui/accessibility/platform/ax_sdk26_compat_mac.h"  // [custom]\n$1|m' "$f"
+done
 
 echo "old-sdk-fixes: applied"
