@@ -14,6 +14,17 @@ if [[ -f "$_root_dir/epoch_job_start.txt" ]]; then
   _remaining_time=$(( 360*60 - 60*60 - $(date +%s) + epoch_job_start ))
 fi
 
+# [custom] Self-heal esbuild for DevTools: older archives held a symlink into build/esbuild-node,
+# which is not archived between jobs, so it dangles on a fresh runner.
+_esbuild_dst="$_src_dir/third_party/devtools-frontend/src/node_modules/esbuild"
+if [[ ! -f "$_esbuild_dst/package.json" ]]; then
+  _esbuild_version="$(esbuild --version)"
+  _esbuild_node="$_root_dir/build/esbuild-node"
+  npm install --prefix "$_esbuild_node" --no-save --package-lock=false --no-bin-links --ignore-scripts --omit=optional --no-audit --no-fund "esbuild@$_esbuild_version"
+  rm -rf "$_esbuild_dst"
+  cp -R "$_esbuild_node/node_modules/esbuild" "$_esbuild_dst"
+fi
+
 cd "$_src_dir"
 
 echo $(date +%s) | tee -a "$_root_dir/build_times_$_target_cpu.log"
