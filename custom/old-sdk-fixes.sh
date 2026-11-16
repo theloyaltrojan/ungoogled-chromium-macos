@@ -54,11 +54,6 @@ wrap device/fido/mac/icloud_keychain_sys.mm '__MAC_OS_X_VERSION_MAX_ALLOWED >= 2
         isDeviceConfiguredForPasskeys];' \
 '    return false;'
 
-# skia: kCGImageByteOrder32Host is the 26-SDK spelling of kCGBitmapByteOrder32Host.
-wrap skia/ext/skia_utils_mac.mm "$SDK26" \
-'          kCGImageByteOrder32Host));' \
-'          kCGBitmapByteOrder32Host));'
-
 # CALayer HDR headroom API is 26-SDK only; older SDK => standard dynamic range.
 wrap ui/accelerated_widget_mac/ca_renderer_layer_tree.mm "$SDK26" \
 '      if (io_surface_color_space_.IsHDR() || max_hdr_headroom > 0.f) {
@@ -96,5 +91,10 @@ for f in ax_platform_node_cocoa.mm ax_platform_node_cocoa_unittest.mm browser_ac
   grep -q 'ax_sdk26_compat_mac.h' "$f" ||
   perl -0pi -e 's|^(#(?:include\|import) )|#include "ui/accessibility/platform/ax_sdk26_compat_mac.h"  // [custom]\n$1|m' "$f"
 done
+
+# CoreGraphics: kCGImageByteOrder32Host is the 26-SDK spelling of kCGBitmapByteOrder32Host.
+grep -rlE 'kCGImageByteOrder32(Host|Little|Big)' --include='*.mm' --include='*.cc' --include='*.h' \
+    third_party/blink/renderer ui skia components content media gpu chrome base 2>/dev/null |
+  xargs -r sed -i '' -E 's/kCGImageByteOrder32(Host|Little|Big)/kCGBitmapByteOrder32\1/g'
 
 echo "old-sdk-fixes: applied"
