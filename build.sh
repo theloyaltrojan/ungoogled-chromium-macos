@@ -70,6 +70,10 @@ _custom_dir="$_root_dir/custom"
 if grep -qvE '^[[:space:]]*(#|$)' "$_custom_dir/patches/series" 2>/dev/null; then
   python3 "$_main_repo/utils/patches.py" apply "$_src_dir" "$_custom_dir/patches"
 fi
+# [custom] app icon (custom/icon/icon.svg is the source; see custom/icon/README)
+if [[ -f "$_custom_dir/icon/app.icns" ]]; then
+  cp "$_custom_dir/icon/app.icns" "$_custom_dir/icon/Assets.car" "$_src_dir/chrome/app/theme/chromium/mac/"
+fi
 
 # [custom] upstream patches hardcode Apple Silicon Homebrew paths for tsc/esbuild;
 # point them at whatever is on PATH (Intel Homebrew or ~/.local)

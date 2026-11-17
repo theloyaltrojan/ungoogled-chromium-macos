@@ -1,0 +1,5 @@
+Custom app icon. build.sh copies app.icns + Assets.car over Chromium's.
+Regenerate from icon.svg: render a 1024px PNG (e.g. Chromium --headless
+--screenshot --default-background-color=00000000 --window-size=1024,1024),
+then `iconutil -c icns` an .iconset and `xcrun actool --app-icon AppIcon`
+an Assets.xcassets/AppIcon.appiconset for Assets.car.
