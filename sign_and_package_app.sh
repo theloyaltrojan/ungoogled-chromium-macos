@@ -27,7 +27,16 @@ fi
 
 sign() {
   if (( _ad_hoc )); then
-    codesign --sign - --force "$@"
+    # [custom] Library validation (explicit, or implied by the hardened runtime)
+    # rejects ad-hoc signed frameworks (no Team ID), so the app can't load its
+    # own framework. Ad-hoc builds drop both; there's no notarization anyway.
+    local _args=() _a
+    for _a in "$@"; do
+      _a="${_a//library,/}"; _a="${_a//,library/}"
+      _a="${_a//runtime,/}"; _a="${_a//,runtime/}"
+      _args+=("$_a")
+    done
+    codesign --sign - --force "${_args[@]}"
   else
     codesign --sign "$MACOS_CERTIFICATE_NAME" --force --timestamp "$@"
   fi

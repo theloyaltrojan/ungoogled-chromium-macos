@@ -37,7 +37,7 @@ set -e
 cd "$ROOT"
 if [[ "${1:-}" == "resume" ]]; then
   cd build/src
-  ./out/Default/gn gen out/Default --fail-on-unused-args
+  [[ -n "${SKIP_GN_GEN:-}" ]] || ./out/Default/gn gen out/Default --fail-on-unused-args
   ninja -k "${NINJA_KEEP_GOING:-1}" -C out/Default chrome chromedriver
   CHROMIUM_SRC_DIR="$ROOT/build/src" "$ROOT/sign_and_package_app.sh"
 else
