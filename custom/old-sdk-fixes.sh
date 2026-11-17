@@ -92,6 +92,32 @@ for f in ax_platform_node_cocoa.mm ax_platform_node_cocoa_unittest.mm browser_ac
   perl -0pi -e 's|^(#(?:include\|import) )|#include "ui/accessibility/platform/ax_sdk26_compat_mac.h"  // [custom]\n$1|m' "$f"
 done
 
+# Glass browser frame: NSGlassEffectView is 26-SDK only (and only used on a
+# macOS 26 runtime). Old SDK => plain layer-backed NSView, no Liquid Glass.
+f=chrome/browser/ui/views/frame/browser_native_widget_mac.mm
+wrap "$f" "$SDK26" \
+'API_AVAILABLE(macos(26.0))
+@interface GlassFrameBackgroundView : NSGlassEffectView
+@end
+
+@implementation GlassFrameBackgroundView
+- (NSView*)hitTest:(NSPoint)point {
+  return nil;
+}
+@end'
+wrap "$f" "$SDK26" \
+'      NSGlassEffectView* const glass_view =
+          [[GlassFrameBackgroundView alloc] initWithFrame:content_view.bounds];
+      glass_view.wantsLayer = YES;
+      glass_view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+      glass_view.style = NSGlassEffectViewStyleRegular;
+
+      glass_view.tintColor = [NSColor clearColor];' \
+'      NSView* const glass_view =
+          [[OpaqueFrameBackgroundView alloc] initWithFrame:content_view.bounds];
+      glass_view.wantsLayer = YES;
+      glass_view.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;'
+
 # CoreGraphics: kCGImageByteOrder32Host is the 26-SDK spelling of kCGBitmapByteOrder32Host.
 grep -rlE 'kCGImageByteOrder32(Host|Little|Big)' --include='*.mm' --include='*.cc' --include='*.h' \
     third_party/blink/renderer ui skia components content media gpu chrome base 2>/dev/null |
