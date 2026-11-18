@@ -1,5 +1,6 @@
 # Load every unpacked extension in '<user data dir>/Autoload Extensions' at
 # startup (symlinks allowed), so personal extensions need no rebuild or Load unpacked.
+# They load without developer mode too, which new profiles (qubes) start without.
 diff --git a/chrome/browser/extensions/extension_service.cc b/chrome/browser/extensions/extension_service.cc
 index 6351963..2540ac0 100644
 --- a/chrome/browser/extensions/extension_service.cc
@@ -91,3 +92,58 @@ index 6351963..2540ac0 100644
    EnabledReloadableExtensions();
    delayed_install_manager_->FinishInstallationsDelayedByShutdown();
    SetReadyAndNotifyListeners();
+diff --git a/chrome/browser/extensions/extension_management.cc b/chrome/browser/extensions/extension_management.cc
+--- a/chrome/browser/extensions/extension_management.cc
++++ b/chrome/browser/extensions/extension_management.cc
+@@ -9,6 +9,8 @@
+ #include <string>
+ #include <utility>
+ 
++#include "base/files/file_enumerator.h"
++#include "base/files/file_util.h"
+ #include "base/command_line.h"
+ #include "base/containers/flat_set.h"
+ #include "base/feature_list.h"
+@@ -441,6 +443,30 @@
+   return true;
+ }
+ 
++namespace {
++// [custom] Extensions in "<user data dir>/Autoload Extensions", or symlinked
++// from there, were put there on purpose, so they load without developer mode.
++// A new profile (like a qube) starts with developer mode off, and that
++// setting is tamper-protected, so it can't be preset.
++bool IsAutoloadExtensionPath(const base::FilePath& user_data_dir,
++                             const base::FilePath& path) {
++  const base::FilePath dir =
++      user_data_dir.Append(FILE_PATH_LITERAL("Autoload Extensions"));
++  if (dir.IsParent(path)) {
++    return true;
++  }
++  base::FileEnumerator e(
++      dir, /*recursive=*/false,
++      base::FileEnumerator::DIRECTORIES | base::FileEnumerator::FILES);
++  for (base::FilePath entry = e.Next(); !entry.empty(); entry = e.Next()) {
++    if (base::MakeAbsoluteFilePath(entry) == path) {
++      return true;
++    }
++  }
++  return false;
++}
++}  // namespace
++
+ bool ExtensionManagement::IsAllowedByUnpackedDeveloperModePolicy(
+     const Extension& extension) {
+   if (g_allow_unpacked_without_developer_mode_for_testing) {
+@@ -457,6 +483,11 @@
+     return true;
+   }
+ 
++  if (IsAutoloadExtensionPath(profile_->GetPath().DirName(),
++                              extension.path())) {
++    return true;
++  }
++
+   bool in_developer_mode =
+       profile_->GetPrefs()->GetBoolean(prefs::kExtensionsUIDeveloperMode);
+   return in_developer_mode;
