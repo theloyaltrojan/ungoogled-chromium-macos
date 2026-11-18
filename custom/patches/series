@@ -3,3 +3,4 @@
 tor-toggle.patch
 island-ui.patch
 autoload-extensions.patch
+side-tabs.patch

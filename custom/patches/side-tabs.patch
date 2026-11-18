@@ -1,0 +1,366 @@
+# Side tabs: tab groups whose title starts with U+2063 are hidden from the
+# horizontal tab strip and listed by the Island Vertical Tabs side panel
+# extension. Dropping dragged tabs or whole groups on the side panel moves
+# them there. Also lowers the side panel minimum width to 160px.
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -2508,6 +2508,12 @@
+             point_in_screen)) {
+       return target;
+     }
++  }
++  // [custom] Tabs dragged over the open side panel can be dropped into the
++  // side-tabs group (the vertical tab list).
++  if (side_panel_ && side_panel_->GetVisible() &&
++      side_panel_->GetBoundsInScreen().Contains(point_in_screen)) {
++    return side_panel_.get();
+   }
+   if (multi_contents_view_->IsInSplitView() ||
+       !multi_contents_view_->IsDragAndDropEnabled()) {
+--- a/chrome/browser/ui/views/side_panel/side_panel.cc
++++ b/chrome/browser/ui/views/side_panel/side_panel.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/ui/views/side_panel/side_panel.h"
+ 
+ #include <algorithm>
++#include <map>  // [custom]
+ #include <memory>
+ 
+ #include "base/callback_list.h"
+@@ -19,6 +20,17 @@
+ #include "chrome/browser/ui/animation/browser_animation_types.h"
+ #include "chrome/browser/ui/browser_element_identifiers.h"
+ #include "chrome/browser/ui/browser_window/public/browser_window_features.h"
++#include "chrome/browser/ui/browser_window/public/browser_window_interface.h"  // [custom]
++#include "chrome/browser/ui/tabs/tab_enums.h"  // [custom]
++#include "chrome/browser/ui/tabs/tab_group_model.h"  // [custom]
++#include "chrome/browser/ui/tabs/tab_model.h"  // [custom]
++#include "chrome/browser/ui/tabs/tab_strip_model.h"  // [custom]
++#include "chrome/browser/ui/views/tabs/dragging/drag_session_data.h"  // [custom]
++#include "chrome/browser/ui/views/tabs/shared/tab_strip_types.h"  // [custom]
++#include "chrome/browser/ui/views/tabs/tab_slot_view.h"  // [custom]
++#include "components/tab_groups/tab_group_color.h"  // [custom]
++#include "components/tab_groups/tab_group_visual_data.h"  // [custom]
++#include "components/tabs/public/tab_group.h"  // [custom]
+ #include "chrome/browser/ui/color/chrome_color_id.h"
+ #include "chrome/browser/ui/side_panel/side_panel_entry.h"
+ #include "chrome/browser/ui/side_panel/side_panel_enums.h"
+@@ -330,7 +342,9 @@
+   SetProperty(views::kElementIdentifierKey, kSidePanelElementId);
+ }
+ 
+-SidePanel::~SidePanel() = default;
++SidePanel::~SidePanel() {
++  on_will_destroy_callback_list_.Notify();  // [custom] TabDragTarget
++}
+ 
+ void SidePanel::SetPanelWidth(int width) {
+   // Only the width is used by BrowserViewLayout.
+@@ -382,11 +396,148 @@
+ 
+ gfx::Size SidePanel::GetMinimumSize() const {
+   const int min_height = 0;
+-  return gfx::Size(
+-      SidePanelEntry::kSidePanelDefaultContentWidth + GetBorderInsets().width(),
+-      min_height);
++  // [custom] Let side panels (e.g. the vertical tab list) get much narrower
++  // than the stock 360px default. The default width when opening is unchanged.
++  constexpr int kCustomMinContentWidth = 160;
++  return gfx::Size(kCustomMinContentWidth + GetBorderInsets().width(),
++                   min_height);
+ }
+ 
++// [custom] ---------------------------------------------------------------
++// Tabs dropped on the side panel join the side-tabs group, which the
++// horizontal strip never draws and the "Island Vertical Tabs" extension lists.
++
++void SidePanel::OnTabDragEntered() {}
++
++TabDragContext* SidePanel::OnTabDragUpdated(
++    TabDragTarget::DragController& controller,
++    const gfx::Point& point_in_screen) {
++  const DragSessionData& data = controller.GetSessionData();
++  bool ok = GetVisible() && data.num_dragging_tabs() > 0 &&
++            GetBoundsInScreen().Contains(point_in_screen);
++  for (const TabDragData& tab : data.tab_drag_data_) {
++    // Pinned tabs can't live in a group.
++    if (tab.view_type == TabSlotView::ViewType::kTab && tab.pinned) {
++      ok = false;
++    }
++  }
++  can_drop_tab_ = ok;
++  return nullptr;  // keep the dragged tabs in their own window until dropped
++}
++
++void SidePanel::OnTabDragExited(const gfx::Point& point_in_screen) {
++  can_drop_tab_ = false;
++}
++
++void SidePanel::OnTabDragEnded() {
++  can_drop_tab_ = false;
++}
++
++bool SidePanel::CanDropTab() {
++  return can_drop_tab_;
++}
++
++void SidePanel::HandleTabDrop(TabDragTarget::DragController& controller) {
++  can_drop_tab_ = false;
++  TabStripModel* const model = browser_view_->browser()->GetTabStripModel();
++
++  // Remember where each dragged tab came from before detaching: tabs dragged
++  // as part of a whole group (header drag) keep that group; single tabs become
++  // loose side tabs.
++  struct Dropped {
++    std::unique_ptr<tabs::TabModel> tab;
++    std::optional<tab_groups::TabGroupId> from_group;
++    std::optional<tab_groups::TabGroupVisualData> visuals;
++  };
++  std::vector<Dropped> dropped;
++  {
++    const DragSessionData& data = controller.GetSessionData();
++    for (size_t i = 0; i < data.tab_drag_data_.size(); ++i) {
++      const TabDragData& d = data.tab_drag_data_[i];
++      if (d.view_type != TabSlotView::ViewType::kTab || !d.contents) {
++        continue;  // group headers aren't tabs
++      }
++      Dropped item;
++      if (d.tab_group_data.has_value() &&
++          data.dragging_groups.contains(d.tab_group_data->group_id)) {
++        item.from_group = d.tab_group_data->group_id;
++        item.visuals = d.tab_group_data->group_visual_data;
++      }
++      dropped.push_back(std::move(item));
++    }
++    // Detach after collecting (detaching may close the drag window).
++    size_t n = 0;
++    for (size_t i = 0; i < data.tab_drag_data_.size(); ++i) {
++      const TabDragData& d = controller.GetSessionData().tab_drag_data_[i];
++      if (d.view_type != TabSlotView::ViewType::kTab || !d.contents) {
++        continue;
++      }
++      dropped[n++].tab = controller.DetachTabAtForInsertion(static_cast<int>(i));
++    }
++  }
++
++  auto find_loose_group = [&]() -> std::optional<tab_groups::TabGroupId> {
++    for (const tab_groups::TabGroupId& id :
++         model->group_model()->ListTabGroups()) {
++      if (model->group_model()->GetTabGroup(id)->visual_data()->title() ==
++          kSideTabsGroupTitle) {
++        return id;
++      }
++    }
++    return std::nullopt;
++  };
++
++  std::map<tab_groups::TabGroupId, tab_groups::TabGroupId> new_groups;
++  std::optional<int> first;
++  for (Dropped& item : dropped) {
++    if (!item.tab) {
++      continue;
++    }
++    std::optional<tab_groups::TabGroupId> group;
++    std::u16string title;
++    tab_groups::TabGroupColorId color = tab_groups::TabGroupColorId::kPurple;
++    if (item.from_group.has_value()) {
++      auto it = new_groups.find(*item.from_group);
++      if (it != new_groups.end()) {
++        group = it->second;
++      }
++      title = std::u16string(kSideTabsNamedGroupPrefix) + item.visuals->title();
++      color = item.visuals->color();
++    } else {
++      group = find_loose_group();
++      title = kSideTabsGroupTitle;
++    }
++    const int index =
++        group.has_value()
++            ? static_cast<int>(
++                  model->group_model()->GetTabGroup(*group)->ListTabs().end())
++            : model->count();
++    const int at = model->InsertDetachedTabAt(index, std::move(item.tab),
++                                              AddTabTypes::ADD_NONE, group);
++    if (!group.has_value()) {
++      group = model->AddToNewGroup({at});
++      model->ChangeTabGroupVisuals(
++          *group, tab_groups::TabGroupVisualData(title, color,
++                                                 /*is_collapsed=*/false));
++      if (item.from_group.has_value()) {
++        new_groups.emplace(*item.from_group, *group);
++      }
++    }
++    if (!first.has_value()) {
++      first = at;
++    }
++  }
++  if (first.has_value()) {
++    model->ActivateTabAt(*first);
++  }
++}
++
++base::CallbackListSubscription SidePanel::RegisterWillDestroyCallback(
++    base::OnceClosure callback) {
++  return on_will_destroy_callback_list_.Add(std::move(callback));
++}
++// [custom] ---------------------------------------------------------------
++
+ bool SidePanel::IsClosing() {
+   return SidePanelAnimations::kClose ==
+          BrowserAnimationController::From(browser_view_->browser())
+--- a/chrome/browser/ui/views/side_panel/side_panel.h
++++ b/chrome/browser/ui/views/side_panel/side_panel.h
+@@ -22,11 +22,13 @@
+ #include "ui/views/animation/animation_delegate_views.h"
+ #include "ui/views/controls/resize_area_delegate.h"
+ #include "ui/views/view_utils.h"
++#include "chrome/browser/ui/views/tabs/dragging/tab_drag_target.h"  // [custom]
+ 
+ class BrowserView;
+ 
+ class SidePanel : public views::AccessiblePaneView,
+-                  public views::ResizeAreaDelegate {
++                  public views::ResizeAreaDelegate,
++                  public TabDragTarget {  // [custom] drop tabs into side tabs
+   METADATA_HEADER(SidePanel, views::AccessiblePaneView)
+ 
+  public:
+@@ -57,6 +59,18 @@
+   bool IsRightAligned() const;
+   gfx::Size GetMinimumSize() const override;
+   bool IsClosing();
++
++  // [custom] TabDragTarget: dropping tabs dragged out of the horizontal strip
++  // onto the side panel moves them into the side-tabs group.
++  void OnTabDragEntered() override;
++  TabDragContext* OnTabDragUpdated(TabDragTarget::DragController& controller,
++                                   const gfx::Point& point_in_screen) override;
++  void OnTabDragExited(const gfx::Point& point_in_screen) override;
++  void OnTabDragEnded() override;
++  bool CanDropTab() override;
++  void HandleTabDrop(TabDragTarget::DragController& controller) override;
++  base::CallbackListSubscription RegisterWillDestroyCallback(
++      base::OnceClosure callback) override;
+   void DisableAnimationsForTesting() { animations_disabled_ = true; }
+   void SetKeyboardResized(bool keyboard_resized) {
+     keyboard_resized_ = keyboard_resized;
+@@ -178,6 +192,10 @@
+ 
+   // Subscription for animation updates.
+   base::CallbackListSubscription animation_subscription_;
++
++  // [custom] Tab drop state (see TabDragTarget overrides).
++  bool can_drop_tab_ = false;
++  base::OnceClosureList on_will_destroy_callback_list_;
+ };
+ 
+ #endif  // CHROME_BROWSER_UI_VIEWS_SIDE_PANEL_SIDE_PANEL_H_
+--- a/chrome/browser/ui/views/tabs/browser_tab_strip_controller.cc
++++ b/chrome/browser/ui/views/tabs/browser_tab_strip_controller.cc
+@@ -360,6 +360,10 @@
+ void BrowserTabStripController::ToggleTabGroupCollapsedState(
+     const tab_groups::TabGroupId group,
+     ToggleTabGroupCollapsedStateOrigin origin) {
++  // [custom] The side-tabs group is never expanded or collapsed in this strip.
++  if (IsSideTabsGroupTitle(GetGroupTitle(group))) {
++    return;
++  }
+   const bool is_currently_collapsed = IsGroupCollapsed(group);
+   bool should_toggle_group = true;
+ 
+@@ -519,11 +523,13 @@
+ 
+ bool BrowserTabStripController::IsGroupCollapsed(
+     const tab_groups::TabGroupId& group) const {
+-  return model_->group_model()->ContainsTabGroup(group) &&
+-         model_->group_model()
+-             ->GetTabGroup(group)
+-             ->visual_data()
+-             ->is_collapsed();
++  if (!model_->group_model()->ContainsTabGroup(group)) {
++    return false;
++  }
++  const tab_groups::TabGroupVisualData* visuals =
++      model_->group_model()->GetTabGroup(group)->visual_data();
++  // [custom] Side-tabs group: hidden from this strip, so always "collapsed".
++  return visuals->is_collapsed() || IsSideTabsGroupTitle(visuals->title());
+ }
+ 
+ std::optional<tab_groups::TabGroupId>
+--- a/chrome/browser/ui/views/tabs/shared/tab_strip_types.h
++++ b/chrome/browser/ui/views/tabs/shared/tab_strip_types.h
+@@ -5,8 +5,22 @@
+ #ifndef CHROME_BROWSER_UI_VIEWS_TABS_SHARED_TAB_STRIP_TYPES_H_
+ #define CHROME_BROWSER_UI_VIEWS_TABS_SHARED_TAB_STRIP_TYPES_H_
+ 
++#include <string_view>
++
+ #include "chrome/browser/ui/tabs/tab_enums.h"
+ 
++// [custom] Groups whose title starts with U+2063 (invisible separator) belong
++// to the side-panel tab list (the "Island Vertical Tabs" extension) and are
++// never drawn in the horizontal tab strip:
++//   "\u2063side"       loose side tabs
++//   "\u2063#<name>"    a tab group moved to the side panel, keeping its name
++inline constexpr char16_t kSideTabsMarker = u'\u2063';
++inline constexpr char16_t kSideTabsGroupTitle[] = u"\u2063side";
++inline constexpr char16_t kSideTabsNamedGroupPrefix[] = u"\u2063#";
++inline bool IsSideTabsGroupTitle(std::u16string_view title) {
++  return !title.empty() && title.front() == kSideTabsMarker;
++}
++
+ // Enum passed to EndDrag().
+ enum class EndDragReason {
+   // Complete the drag.
+--- a/chrome/browser/ui/views/tabs/tab_container_impl.cc
++++ b/chrome/browser/ui/views/tabs/tab_container_impl.cc
+@@ -753,6 +753,10 @@
+       // group's underline bounds.
+       bool should_header_be_visible = last_tab_visible;
+       if (focused_group.has_value() && last_tab_group != focused_group) {
++        should_header_be_visible = false;
++      }
++      // [custom] The side-tabs group has no presence in this strip at all.
++      if (group_view->header()->IsSideTabsGroup()) {
+         should_header_be_visible = false;
+       }
+       if (should_header_be_visible != group_view->header()->GetVisible()) {
+--- a/chrome/browser/ui/views/tabs/tab_group_header.cc
++++ b/chrome/browser/ui/views/tabs/tab_group_header.cc
+@@ -850,3 +850,9 @@
+ BEGIN_METADATA(TabGroupHeader)
+ ADD_READONLY_PROPERTY_METADATA(int, DesiredWidth)
+ END_METADATA
++
++// [custom]
++bool TabGroupHeader::IsSideTabsGroup() const {
++  return group().has_value() &&
++         IsSideTabsGroupTitle(tab_slot_controller_->GetGroupTitle(group().value()));
++}
+--- a/chrome/browser/ui/views/tabs/tab_group_header.h
++++ b/chrome/browser/ui/views/tabs/tab_group_header.h
+@@ -51,6 +51,10 @@
+   METADATA_HEADER(TabGroupHeader, TabSlotView)
+ 
+  public:
++  // [custom] True for the side-panel tab list's group (see
++  // IsSideTabsGroupTitle), which the horizontal strip never draws.
++  bool IsSideTabsGroup() const;
++
+   TabGroupHeader(TabSlotController& tab_slot_controller,
+                  const tab_groups::TabGroupId& group,
+                  const TabGroupStyleViews& style);
+--- a/chrome/browser/ui/views/tabs/tab_strip_layout_helper.cc
++++ b/chrome/browser/ui/views/tabs/tab_strip_layout_helper.cc
+@@ -434,6 +434,11 @@
+   // Otherwise, a tab is only collapsed if it is in an explicitly collapsed
+   // group.
+   const std::optional<tab_groups::TabGroupId> id = slots_[i].view->group();
++  // [custom] The side-tabs group's header collapses to nothing as well.
++  if (slots_[i].type == TabSlotView::ViewType::kTabGroupHeader &&
++      views::AsViewClass<TabGroupHeader>(slots_[i].view)->IsSideTabsGroup()) {
++    return true;
++  }
+   return slots_[i].type == TabSlotView::ViewType::kTab && id.has_value() &&
+          controller_->IsGroupCollapsed(id.value());
+ }

@@ -21,7 +21,7 @@ index 6351963..2540ac0 100644
  #include "base/threading/thread_restrictions.h"
  #include "base/time/time.h"
  #include "base/trace_event/trace_event.h"
-@@ -173,6 +176,38 @@ bool ShouldBlockCommandLineExtension(Profile& profile) {
+@@ -173,6 +176,53 @@
  }
  #endif
  
@@ -49,7 +49,22 @@ index 6351963..2540ac0 100644
 +  if (!service) {
 +    return;
 +  }
++  // Extensions loaded before are already in the profile's prefs and were
++  // loaded (from disk, so edits are picked up) before the first window opened.
++  // Loading them again here would count as an update: unload, then reload,
++  // and a tab opening in that gap gets the stock New Tab page instead of an
++  // override. So only install folders that aren't installed yet. This also
++  // leaves an autoloaded extension the user disabled in chrome://extensions
++  // disabled.
++  std::set<base::FilePath> installed;
++  for (const auto& ext : ExtensionRegistry::Get(service->profile())
++                             ->GenerateInstalledExtensionsSet()) {
++    installed.insert(ext->path());
++  }
 +  for (const base::FilePath& path : paths) {
++    if (installed.contains(path)) {
++      continue;
++    }
 +    scoped_refptr<UnpackedInstaller> installer =
 +        UnpackedInstaller::Create(service->profile());
 +    installer->set_be_noisy_on_failure(false);
@@ -60,7 +75,7 @@ index 6351963..2540ac0 100644
  }  // namespace
  
  // ExtensionService.
-@@ -372,6 +407,15 @@ void ExtensionService::Init() {
+@@ -372,6 +422,15 @@
    if (load_command_line_extensions) {
      LoadExtensionsFromCommandLineFlag(switches::kLoadExtension);
    }
