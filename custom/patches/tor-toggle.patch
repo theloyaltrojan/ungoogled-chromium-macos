@@ -1,5 +1,5 @@
 # Tor, built in. App menu: New Tor window (throwaway incognito profile routed
-# through 127.0.0.1:9050), Route everything through Tor (global toggle), New Tor
+# through 127.0.0.1:9050, or the port in --tor-socks-port), Route everything through Tor (global toggle), New Tor
 # identity (SIGNAL NEWNYM via ~/.local/bin/tor-newnym + drop pooled connections).
 # A purple 'tor' pill shows in the toolbar of any window that goes through Tor.
 # WebRTC is limited to proxied UDP while Tor is on.
@@ -55,10 +55,11 @@ diff --git a/chrome/browser/ui/browser_commands.cc b/chrome/browser/ui/browser_c
 index f4d3a23..6087584 100644
 --- a/chrome/browser/ui/browser_commands.cc
 +++ b/chrome/browser/ui/browser_commands.cc
-@@ -15,6 +15,10 @@
+@@ -15,6 +15,11 @@
  #include "base/check.h"
  #include "base/check_deref.h"
  #include "base/command_line.h"
++#include "base/strings/string_number_conversions.h"
 +#include "base/files/file_util.h"
 +#include "base/functional/callback_helpers.h"
 +#include "base/process/launch.h"
@@ -66,7 +67,7 @@ index f4d3a23..6087584 100644
  #include "base/containers/adapters.h"
  #include "base/feature_list.h"
  #include "base/i18n/rtl.h"
-@@ -200,6 +204,8 @@
+@@ -200,6 +205,8 @@
  #include "content/public/browser/render_view_host.h"
  #include "content/public/browser/render_widget_host_view.h"
  #include "content/public/browser/web_contents.h"
@@ -75,14 +76,27 @@ index f4d3a23..6087584 100644
  #include "content/public/common/content_switches.h"
  #include "content/public/common/url_constants.h"
  #include "content/public/common/url_utils.h"
-@@ -1346,6 +1352,78 @@ void NewIncognitoWindow(Profile* profile) {
-   NewEmptyWindow(profile->GetPrimaryOTRProfile(/*create_if_needed=*/true));
- }
+@@ -1344,8 +1351,91 @@
  
+ void NewIncognitoWindow(Profile* profile) {
+   NewEmptyWindow(profile->GetPrimaryOTRProfile(/*create_if_needed=*/true));
++}
++
 +namespace {
 +// Pref path and dictionary keys used by components/proxy_config.
 +constexpr char kTorProxyPref[] = "proxy";
-+constexpr char kTorProxyServer[] = "socks5://127.0.0.1:9050";
++// Tor's SOCKS port. A qube passes its own with --tor-socks-port, and Tor never
++// shares circuits between streams that arrive on different SOCKS ports.
++std::string TorProxyServer() {
++  int port = 0;
++  const std::string value =
++      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
++          "tor-socks-port");
++  if (!base::StringToInt(value, &port) || port <= 0 || port > 65535) {
++    port = 9050;
++  }
++  return "socks5://127.0.0.1:" + base::NumberToString(port);
++}
 +
 +void SetTorPrefs(PrefService* prefs, bool on) {
 +  if (!on) {
@@ -95,7 +109,7 @@ index f4d3a23..6087584 100644
 +  // .onion works. If Tor isn't running, requests fail rather than going direct.
 +  base::DictValue proxy;
 +  proxy.Set("mode", "fixed_servers");
-+  proxy.Set("server", kTorProxyServer);
++  proxy.Set("server", TorProxyServer());
 +  proxy.Set("bypass_list", "localhost;127.0.0.1;[::1]");
 +  prefs->SetDict(kTorProxyPref, std::move(proxy));
 +  // WebRTC UDP can bypass the proxy and reveal the real IP.
@@ -113,7 +127,7 @@ index f4d3a23..6087584 100644
 +bool IsTorEnabled(Profile* profile) {
 +  const base::DictValue& proxy = profile->GetPrefs()->GetDict(kTorProxyPref);
 +  const std::string* server = proxy.FindString("server");
-+  return server && *server == kTorProxyServer;
++  return server && *server == TorProxyServer();
 +}
 +
 +void ToggleTor(Profile* profile) {
@@ -129,8 +143,8 @@ index f4d3a23..6087584 100644
 +      /*create_if_needed=*/true);
 +  SetTorPrefs(tor_profile->GetPrefs(), true);
 +  OpenEmptyWindow(tor_profile, /*should_trigger_session_restore=*/false);
-+}
-+
+ }
+ 
 +void NewTorIdentity(Profile* profile) {
 +  base::ThreadPool::PostTask(
 +      FROM_HERE,
